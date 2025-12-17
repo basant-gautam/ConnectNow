@@ -1,6 +1,6 @@
 const socket = io('/');
 const localVideo = document.getElementById('localVideo');
-const remoteVideo = document.getElementById('remoteVideo');
+const remoteVideosContainer = document.getElementById('remoteVideos');
 const createRoomBtn = document.getElementById('createRoomBtn');
 const showJoinBtn = document.getElementById('showJoinBtn');
 const joinBtn = document.getElementById('joinBtn');
@@ -19,7 +19,7 @@ const chatRoomLabel = document.getElementById('chatRoomLabel');
 const usernameEl = document.getElementById('username');
 
 let localStream;
-let peer;
+let peers = {}; // map of socketId -> SimplePeer
 let currentRoom;
 let myVideoStream;
 let chatLastTimestamp = null;
@@ -153,9 +153,11 @@ function joinRoom(roomId) {
     if (currentRoom === roomId) return; // Prevent joining same room multiple times
     
     // Clean up any existing peer connection
-    if (peer) {
-        peer.destroy();
-        peer = null;
+    // Destroy any existing peer connections
+    for (const id in peers) {
+        try { peers[id].destroy(); } catch (e) {}
+        removeRemoteVideo(id);
+        delete peers[id];
     }
     
     currentRoom = roomId;
@@ -175,10 +177,10 @@ socket.on('user-connected', (userId) => {
 });
 
 function connectToNewUser(userId) {
-    console.log('Initiating connection to:', userId);
-    
-    // Create a new peer connection
-    peer = new SimplePeer({
+    if (!localStream) return;
+    if (peers[userId]) return;
+
+    const peer = new SimplePeer({
         initiator: true,
         trickle: false,
         stream: localStream,
@@ -191,7 +193,7 @@ function connectToNewUser(userId) {
     });
 
     peer.on('signal', (data) => {
-        console.log('Sending signal to:', userId);
+        console.log('Emitting send-signal to', userId);
         socket.emit('send-signal', {
             userToSignal: userId,
             callerID: socket.id,
@@ -200,35 +202,30 @@ function connectToNewUser(userId) {
     });
 
     peer.on('stream', (stream) => {
-        console.log('Received stream from peer');
-        remoteVideo.srcObject = stream;
+        console.log('Received remote stream from', userId, stream);
+        addRemoteVideo(stream, userId);
         updateStatus('Connected to remote user');
     });
 
     peer.on('error', (err) => {
-        console.error('Peer connection error:', err);
-        updateStatus('Connection error', false);
-        alert('Connection error. Please try rejoining the room.');
+        console.error('Peer error for', userId, err);
     });
 
     peer.on('close', () => {
-        console.log('Peer connection closed');
-        remoteVideo.srcObject = null;
-        updateStatus('Connection closed', false);
+        removeRemoteVideo(userId);
+        delete peers[userId];
     });
+
+    peers[userId] = peer;
 }
 
 // Handle incoming calls
 socket.on('user-joined', ({ signal, callerID }) => {
     console.log('Received join signal from:', callerID);
     updateStatus('Incoming connection...');
-    
-    if (peer) {
-        console.log('Destroying existing peer connection');
-        peer.destroy();
-    }
-    
-    peer = new SimplePeer({
+    if (peers[callerID]) return;
+
+    const peer = new SimplePeer({
         initiator: false,
         trickle: false,
         stream: localStream,
@@ -241,7 +238,7 @@ socket.on('user-joined', ({ signal, callerID }) => {
     });
 
     peer.on('signal', (data) => {
-        console.log('Sending return signal to:', callerID);
+        console.log('Emitting return-signal to', callerID);
         socket.emit('return-signal', {
             signal: data,
             callerID: callerID
@@ -249,31 +246,29 @@ socket.on('user-joined', ({ signal, callerID }) => {
     });
 
     peer.on('stream', (stream) => {
-        console.log('Received stream from peer');
-        remoteVideo.srcObject = stream;
+        console.log('Received remote stream from', callerID, stream);
+        addRemoteVideo(stream, callerID);
         updateStatus('Connected to remote user');
     });
 
-    peer.on('error', (err) => {
-        console.error('Peer connection error:', err);
-        updateStatus('Connection error', false);
-        alert('Connection error. Please try rejoining the room.');
+    peer.on('close', () => {
+        removeRemoteVideo(callerID);
+        delete peers[callerID];
     });
 
-    peer.on('close', () => {
-        console.log('Peer connection closed');
-        remoteVideo.srcObject = null;
-        updateStatus('Connection closed', false);
-    });
+    peer.on('error', err => console.error('Peer error', err));
 
     peer.signal(signal);
+    peers[callerID] = peer;
 });
 
 // Handle receiving returned signal
 socket.on('receiving-returned-signal', ({ signal, id }) => {
-    console.log('Received returned signal from:', id);
-    if (peer) {
-        peer.signal(signal);
+    console.log('Received returned signal from', id);
+    if (peers[id]) {
+        peers[id].signal(signal);
+    } else {
+        console.warn('No peer found for id', id);
     }
 });
 
@@ -281,22 +276,23 @@ socket.on('receiving-returned-signal', ({ signal, id }) => {
 socket.on('user-disconnected', (userId) => {
     console.log('User disconnected:', userId);
     updateStatus('Remote user disconnected', false);
-    if (peer) {
-        peer.destroy();
-        peer = null;
+    if (peers[userId]) {
+        try { peers[userId].destroy(); } catch (e) {}
+        delete peers[userId];
     }
-    remoteVideo.srcObject = null;
+    removeRemoteVideo(userId);
 });
 
 // Handle socket disconnection
 socket.on('disconnect', () => {
     console.log('Socket disconnected');
     updateStatus('Disconnected from server', false);
-    if (peer) {
-        peer.destroy();
-        peer = null;
+    // Destroy all peers and clear remote videos
+    for (const id in peers) {
+        try { peers[id].destroy(); } catch (e) {}
+        delete peers[id];
     }
-    remoteVideo.srcObject = null;
+    remoteVideosContainer.innerHTML = '';
 });
 
 // Handle socket connection
@@ -324,38 +320,11 @@ socket.on('chat-message', ({ sender, message, timestamp, socketId }) => {
     appendChatMessage({ sender: sender || 'Guest', message, timestamp, isOwn: false });
 });
 
-// Function to handle video stream
-async function setupVideoStream() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true
-        });
-        myVideoStream = stream;
-        addVideoStream(localVideo, stream);
-        
-        // Handle incoming calls
-        socket.on('user-connected', userId => {
-            console.log('User connected:', userId);
-            connectToNewUser(userId, stream);
-            updateStatus(true);
-        });
-
-        // Handle user disconnection
-        socket.on('user-disconnected', userId => {
-            console.log('User disconnected:', userId);
-            if (peers[userId]) {
-                peers[userId].close();
-                delete peers[userId];
-            }
-            updateStatus(false);
-        });
-
-    } catch (error) {
-        console.error('Error accessing media devices:', error);
-        alert('Unable to access camera or microphone. Please check your permissions.');
-    }
-}
+// If server sends list of current users when we join
+socket.on('all-users', (users) => {
+    console.log('all-users list received:', users);
+    users.forEach(userId => connectToNewUser(userId));
+});
 
 // Function to add video stream to video element
 function addVideoStream(video, stream) {
@@ -369,31 +338,40 @@ function addVideoStream(video, stream) {
     }
 }
 
-// Handle receiving returned signal
-socket.on('receiving-returned-signal', payload => {
-    const peer = new SimplePeer({
-        initiator: false,
-        trickle: false,
-        stream: myVideoStream
-    });
+function addRemoteVideo(stream, id) {
+    // Avoid duplicate
+    if (document.getElementById(`remote-${id}`)) return;
 
-    peer.on('signal', signal => {
-        socket.emit('return-signal', {
-            signal: signal,
-            callerID: payload.id
-        });
-    });
+    const wrapper = document.createElement('div');
+    wrapper.className = 'video-wrapper';
+    wrapper.id = `remote-${id}`;
 
-    peer.on('stream', remoteStream => {
-        addVideoStream(remoteVideo, remoteStream);
-    });
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    video.addEventListener('loadedmetadata', () => video.play().catch(e => console.error(e)));
 
-    peer.signal(payload.signal);
-    peers[payload.id] = peer;
-});
+    const label = document.createElement('div');
+    label.className = 'video-label';
+    label.textContent = id;
+
+    wrapper.appendChild(video);
+    wrapper.appendChild(label);
+    remoteVideosContainer.appendChild(wrapper);
+}
+
+function removeRemoteVideo(id) {
+    const el = document.getElementById(`remote-${id}`);
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+// (duplicate handler removed) receiving-returned-signal is handled above.
 
 // Initialize room controls visibility
 document.addEventListener('DOMContentLoaded', () => {
     roomInfo.classList.remove('show');
     joinControls.classList.remove('show');
+    // Initialize local media stream for quick preview
+    getMedia();
 }); 

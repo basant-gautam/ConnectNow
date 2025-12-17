@@ -194,8 +194,12 @@ io.on('connection', (socket) => {
     }
     rooms.get(roomId).add(socket.id);
 
-    // Notify other users in the room
-    socket.to(roomId).emit('user-connected', socket.id);
+    // Send list of other users in the room to the joining socket
+    const otherUsers = Array.from(rooms.get(roomId)).filter(id => id !== socket.id);
+    if (otherUsers.length > 0) {
+      console.log(`Sending existing users to ${socket.id}:`, otherUsers);
+      io.to(socket.id).emit('all-users', otherUsers);
+    }
     
     console.log(`Room ${roomId} users:`, Array.from(rooms.get(roomId)));
   });

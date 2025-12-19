@@ -82,6 +82,15 @@ function showApp(user) {
     appContainer.classList.remove('hidden');
     if (user && user.username) {
         usernameSpan.textContent = user.username;
+        // Update local video placeholder with username
+        const localAvatar = document.getElementById('localAvatar');
+        const localUsername = document.getElementById('localUsername');
+        if (localAvatar) {
+            localAvatar.textContent = user.username.charAt(0).toUpperCase();
+        }
+        if (localUsername) {
+            localUsername.textContent = user.username;
+        }
     }
 }
 

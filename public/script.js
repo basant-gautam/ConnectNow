@@ -1,4 +1,6 @@
-const socket = io('/');
+// If you deploy frontend (Vercel) and backend (Render) separately, set window.BACKEND_URL
+// (via an inline <script> in index.html) to your Render URL.
+const socket = io(window.BACKEND_URL || '/');
 const localVideo = document.getElementById('localVideo');
 const remoteVideosContainer = document.getElementById('remoteVideos');
 const createRoomBtn = document.getElementById('createRoomBtn');
